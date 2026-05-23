@@ -1,53 +1,17 @@
-const supabaseClient =
-  supabase.createClient(
-    SUPABASE_URL,
-    SUPABASE_API_KEY
-  );
-
-// async function sendTelegramMessage(message) {
-
-//   try {
-
-//     await fetch(
-//       `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-//       {
-//         method: "POST",
-
-//         headers: {
-//           "Content-Type":
-//             "application/json",
-//         },
-
-//         body: JSON.stringify({
-//           chat_id: TELEGRAM_CHAT_ID,
-
-//           text: message,
-//         }),
-//       }
-//     );
-
-//   } catch (err) {
-
-//     console.error(
-//       "Telegram Error:",
-//       err
-//     );
-
-//   }
-// }
+const supabaseClient = supabase.createClient(
+  SUPABASE_URL,
+  SUPABASE_API_KEY
+);
 
 async function sendTelegramMessage(message) {
-
   try {
-
     await fetch(
       "/.netlify/functions/sendTelegram",
       {
         method: "POST",
 
         headers: {
-          "Content-Type":
-            "application/json",
+          "Content-Type": "application/json",
         },
 
         body: JSON.stringify({
@@ -55,12 +19,8 @@ async function sendTelegramMessage(message) {
         }),
       }
     );
-
   } catch (err) {
-
-    console.error(
-      err
-    );
+    console.error(err);
   }
 }
 
@@ -177,7 +137,13 @@ async function handleAction(action) {
       ).value
     );
 
-  if (!meterReading) {
+  // Validation
+
+  if (
+    meterReading === '' ||
+    meterReading === null ||
+    isNaN(meterReading)
+  ) {
 
     alert(
       "Enter meter reading"
@@ -208,20 +174,6 @@ async function handleAction(action) {
       (u) => u.user_name
     );
 
-  // Duplicate join check
-
-  if (
-    action === "JOIN" &&
-    activeUsers.includes(userName)
-  ) {
-
-    alert(
-      "User already active"
-    );
-
-    return;
-  }
-
   // Invalid exit check
 
   if (
@@ -231,6 +183,36 @@ async function handleAction(action) {
 
     alert(
       "User not active"
+    );
+
+    return;
+  }
+
+  // Get all events
+
+  const {
+    data: allEvents
+  } = await supabaseClient
+    .from("events")
+    .select("*")
+    .order(
+      "timestamp",
+      { ascending: true }
+    );
+
+  const isFirstUsage =
+    !allEvents ||
+    allEvents.length === 0;
+
+  // First usage must start at 0
+
+  if (
+    isFirstUsage &&
+    meterReading !== 0
+  ) {
+
+    alert(
+      "First meter reading must be 0"
     );
 
     return;
@@ -252,11 +234,12 @@ async function handleAction(action) {
     .limit(1)
     .single();
 
-  // Close previous segment
+  // Close previous usage segment
 
   if (
     lastEvent &&
-    activeUsers.length > 0
+    activeUsers.length > 0 &&
+    !isFirstUsage
   ) {
 
     const startMeter =
@@ -278,139 +261,254 @@ async function handleAction(action) {
       return;
     }
 
-    const billing =
-      calculateBilling(
-        startMeter,
-        endMeter,
-        activeUsers
+    // Get events between readings
+
+    const {
+      data: eventsInRange
+    } = await supabaseClient
+      .from("events")
+      .select("*")
+      .gte(
+        "meter_reading",
+        startMeter
+      )
+      .lte(
+        "meter_reading",
+        endMeter
+      )
+      .order(
+        "meter_reading",
+        {
+          ascending: true
+        }
       );
 
-    // Save segment
+    let segments = [];
 
-    await supabaseClient
-      .from(
-        "usage_segments"
-      )
-      .insert({
+    let prevMeter =
+      startMeter;
 
-        start_meter:
-          startMeter,
-
-        end_meter:
-          endMeter,
-
-        units_used:
-          billing.unitsUsed,
-
-        active_users:
-          activeUsers,
-
-        cost:
-          billing.cost,
-
-        split_per_user:
-          billing.splitPerUser,
-      });
-
-    // Update totals
+    let currentUsers =
+      [...activeUsers];
 
     for (
-      const user
-      of activeUsers
+      let i = 0;
+      i < eventsInRange.length;
+      i++
     ) {
 
-      const {
-        data: existing,
-      } = await supabaseClient
-        .from("user_totals")
-        .select("*")
-        .eq(
-          "user_name",
-          user
-        )
-        .single();
+      const evt =
+        eventsInRange[i];
 
-      if (existing) {
-
-        await supabaseClient
-          .from(
-            "user_totals"
-          )
-          .update({
-
-            total_amount:
-              Number(
-                existing.total_amount
-              ) +
-              billing.splitPerUser,
-
-            total_units:
-              Number(
-                existing.total_units
-              ) +
-              (
-                billing.unitsUsed /
-                activeUsers.length
-              ),
-
-          })
-          .eq(
-            "user_name",
-            user
-          );
-
-      } else {
-
-        await supabaseClient
-          .from(
-            "user_totals"
-          )
-          .insert({
-
-            user_name:
-              user,
-
-            total_amount:
-              billing.splitPerUser,
-
-            total_units:
-              billing.unitsUsed /
-              activeUsers.length,
-
-          });
-
+      if (
+        evt.meter_reading ===
+        prevMeter
+      ) {
+        continue;
       }
+
+      segments.push({
+        from: prevMeter,
+        to: evt.meter_reading,
+        users: [...currentUsers],
+      });
+
+      if (
+        evt.action === "JOIN" &&
+        !currentUsers.includes(
+          evt.user_name
+        )
+      ) {
+
+        currentUsers.push(
+          evt.user_name
+        );
+
+      } else if (
+        evt.action === "EXIT"
+      ) {
+
+        currentUsers =
+          currentUsers.filter(
+            u =>
+              u !== evt.user_name
+          );
+      }
+
+      prevMeter =
+        evt.meter_reading;
     }
 
-    await sendTelegramMessage(
+    // Final segment
+
+    if (
+      prevMeter < endMeter &&
+      currentUsers.length > 0
+    ) {
+
+      segments.push({
+        from: prevMeter,
+        to: endMeter,
+        users: [...currentUsers],
+      });
+    }
+
+    // Save all segments
+
+    for (
+      const seg of segments
+    ) {
+
+      const unitsUsed =
+        Number(
+          (
+            seg.to -
+            seg.from
+          ).toFixed(2)
+        );
+
+      const cost =
+        Number(
+          (
+            unitsUsed *
+            UNIT_PRICE
+          ).toFixed(2)
+        );
+
+      const splitPerUser =
+        Number(
+          (
+            cost /
+            seg.users.length
+          ).toFixed(2)
+        );
+
+      // Insert usage segment
+
+      await supabaseClient
+        .from(
+          "usage_segments"
+        )
+        .insert({
+
+          start_meter:
+            seg.from,
+
+          end_meter:
+            seg.to,
+
+          units_used:
+            unitsUsed,
+
+          active_users:
+            seg.users,
+
+          cost,
+
+          split_per_user:
+            splitPerUser,
+        });
+
+      // Update totals
+
+      for (
+        const user
+        of seg.users
+      ) {
+
+        const {
+          data: existing,
+        } =
+          await supabaseClient
+            .from(
+              "user_totals"
+            )
+            .select("*")
+            .eq(
+              "user_name",
+              user
+            )
+            .single();
+
+        if (existing) {
+
+          await supabaseClient
+            .from(
+              "user_totals"
+            )
+            .update({
+
+              total_amount:
+                Number(
+                  existing.total_amount
+                ) +
+                splitPerUser,
+
+              total_units:
+                Number(
+                  existing.total_units
+                ) +
+                (
+                  unitsUsed /
+                  seg.users.length
+                ),
+
+            })
+            .eq(
+              "user_name",
+              user
+            );
+
+        } else {
+
+          await supabaseClient
+            .from(
+              "user_totals"
+            )
+            .insert({
+
+              user_name:
+                user,
+
+              total_amount:
+                splitPerUser,
+
+              total_units:
+                unitsUsed /
+                seg.users.length,
+
+            });
+        }
+      }
+
+      // Telegram notification
+
+      await sendTelegramMessage(
 `❄️ AC UPDATE
 
-👤 User:
-${userName}
-
-🚪 Action:
-${action}
+👥 Users:
+${seg.users.join(", ")}
 
 ⚡ Units:
-${billing.unitsUsed}
+${unitsUsed}
 
 💰 Cost:
-₹${billing.cost}
+₹${cost}
 
-👥 Split:
-₹${billing.splitPerUser}`
-    );
+👤 Split Per User:
+₹${splitPerUser}`
+      );
+    }
   }
 
-  // Update active users
+  // Update active users table
 
   if (action === "JOIN") {
 
     await supabaseClient
       .from("active_users")
       .insert({
-        user_name:
-          userName,
+        user_name: userName
       });
 
   } else {
@@ -422,10 +520,9 @@ ${billing.unitsUsed}
         "user_name",
         userName
       );
-
   }
 
-  // Log event
+  // Save event
 
   await supabaseClient
     .from("events")
@@ -438,12 +535,61 @@ ${billing.unitsUsed}
 
       meter_reading:
         meterReading,
-
     });
+
+  // Flexible exit update
+
+  if (action === "EXIT") {
+
+    const {
+      data: prevExit
+    } = await supabaseClient
+      .from("events")
+      .select("*")
+      .eq(
+        "user_name",
+        userName
+      )
+      .eq(
+        "action",
+        "EXIT"
+      )
+      .order(
+        "meter_reading",
+        {
+          ascending: false
+        }
+      )
+      .limit(1)
+      .single();
+
+    if (
+      prevExit &&
+      prevExit.meter_reading <
+      meterReading
+    ) {
+
+      await supabaseClient
+        .from("events")
+        .update({
+
+          meter_reading:
+            meterReading
+        })
+        .eq(
+          "id",
+          prevExit.id
+        );
+    }
+  }
+
+  // Reset field
 
   document.getElementById(
     "meterReading"
   ).value = "";
+
+  // Reload UI
 
   await loadActiveUsers();
 
