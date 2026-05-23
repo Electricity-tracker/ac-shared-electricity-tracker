@@ -102,26 +102,32 @@ async function loadSummary() {
   });
 }
 
-// Recalculate billing
+// Recalculate all billing
 
 async function recalculateAllBilling() {
+
+  // Clear old segments
 
   await supabaseClient
     .from("usage_segments")
     .delete()
-    .neq("id", 0);
+    .not("id", "is", null);
+
+  // Clear totals
 
   await supabaseClient
     .from("user_totals")
     .delete()
-    .neq("id", 0);
+    .not("user_name", "is", null);
+
+  // Get all events ordered by timestamp
 
   const { data: events } =
     await supabaseClient
       .from("events")
       .select("*")
       .order(
-        "meter_reading",
+        "timestamp",
         {
           ascending: true
         }
@@ -148,6 +154,8 @@ async function recalculateAllBilling() {
     const nextEvent =
       events[i + 1];
 
+    // Apply JOIN
+
     if (
       currentEvent.action ===
       "JOIN"
@@ -163,8 +171,11 @@ async function recalculateAllBilling() {
           currentEvent.user_name
         );
       }
+    }
 
-    } else if (
+    // Apply EXIT
+
+    else if (
       currentEvent.action ===
       "EXIT"
     ) {
@@ -176,6 +187,8 @@ async function recalculateAllBilling() {
             currentEvent.user_name
         );
     }
+
+    // Skip if no active users
 
     if (
       activeUsers.length === 0
@@ -192,6 +205,8 @@ async function recalculateAllBilling() {
       Number(
         nextEvent.meter_reading
       );
+
+    // Skip invalid range
 
     if (
       endMeter <= startMeter
@@ -223,6 +238,8 @@ async function recalculateAllBilling() {
         ).toFixed(2)
       );
 
+    // Save segment
+
     await supabaseClient
       .from(
         "usage_segments"
@@ -247,6 +264,8 @@ async function recalculateAllBilling() {
           splitPerUser,
       });
 
+    // Update totals
+
     for (
       const user
       of activeUsers
@@ -263,7 +282,7 @@ async function recalculateAllBilling() {
           "user_name",
           user
         )
-        .single();
+        .maybeSingle();
 
       if (existing) {
 
@@ -313,7 +332,6 @@ async function recalculateAllBilling() {
                 unitsUsed /
                 activeUsers.length
               ),
-
           });
       }
     }
@@ -322,7 +340,7 @@ async function recalculateAllBilling() {
   await loadSummary();
 }
 
-// Handle join and exit
+// Handle actions
 
 async function handleAction(action) {
 
@@ -338,8 +356,10 @@ async function handleAction(action) {
       ).value
     );
 
+  // Validate meter
+
   if (
-    meterReading === '' ||
+    meterReading === "" ||
     meterReading === null ||
     isNaN(meterReading)
   ) {
@@ -351,6 +371,8 @@ async function handleAction(action) {
     return;
   }
 
+  // Validate negative
+
   if (meterReading < 0) {
 
     alert(
@@ -359,6 +381,8 @@ async function handleAction(action) {
 
     return;
   }
+
+  // Get active users
 
   const {
     data: activeUsersData
@@ -370,6 +394,8 @@ async function handleAction(action) {
     activeUsersData.map(
       (u) => u.user_name
     );
+
+  // Prevent duplicate JOIN
 
   if (
     action === "JOIN" &&
@@ -383,6 +409,8 @@ async function handleAction(action) {
     return;
   }
 
+  // Prevent invalid EXIT
+
   if (
     action === "EXIT" &&
     !activeUsers.includes(userName)
@@ -395,6 +423,8 @@ async function handleAction(action) {
     return;
   }
 
+  // Get all events
+
   const {
     data: allEvents
   } = await supabaseClient
@@ -404,6 +434,8 @@ async function handleAction(action) {
   const isFirstUsage =
     !allEvents ||
     allEvents.length === 0;
+
+  // Force first meter to 0
 
   if (
     isFirstUsage &&
@@ -417,6 +449,8 @@ async function handleAction(action) {
     return;
   }
 
+  // Insert event
+
   await supabaseClient
     .from("events")
     .insert({
@@ -429,6 +463,8 @@ async function handleAction(action) {
       meter_reading:
         meterReading,
     });
+
+  // Update active users
 
   if (action === "JOIN") {
 
@@ -451,7 +487,11 @@ async function handleAction(action) {
       );
   }
 
+  // Recalculate billing
+
   await recalculateAllBilling();
+
+  // Telegram
 
   await sendTelegramMessage(
 `❄️ AC UPDATE
@@ -466,9 +506,13 @@ ${action}
 ${meterReading}`
   );
 
+  // Clear input
+
   document.getElementById(
     "meterReading"
   ).value = "";
+
+  // Reload UI
 
   await loadActiveUsers();
 
@@ -491,6 +535,8 @@ async function updateMissedExit() {
       ).value
     );
 
+  // Validate meter
+
   if (
     isNaN(correctMeter)
   ) {
@@ -501,6 +547,8 @@ async function updateMissedExit() {
 
     return;
   }
+
+  // Find latest exit
 
   const {
     data: latestExit
@@ -516,13 +564,15 @@ async function updateMissedExit() {
       "EXIT"
     )
     .order(
-      "meter_reading",
+      "timestamp",
       {
         ascending: false
       }
     )
     .limit(1)
-    .single();
+    .maybeSingle();
+
+  // No exit found
 
   if (!latestExit) {
 
@@ -532,6 +582,8 @@ async function updateMissedExit() {
 
     return;
   }
+
+  // Update exit
 
   await supabaseClient
     .from("events")
@@ -546,7 +598,11 @@ async function updateMissedExit() {
       latestExit.id
     );
 
+  // Recalculate
+
   await recalculateAllBilling();
+
+  // Telegram
 
   await sendTelegramMessage(
 `✏️ EXIT UPDATED
@@ -562,6 +618,8 @@ ${correctMeter}`
     "Exit updated successfully"
   );
 
+  // Clear field
+
   document.getElementById(
     "meterReading"
   ).value = "";
@@ -569,7 +627,7 @@ ${correctMeter}`
   await loadSummary();
 }
 
-// Button events
+// Join button
 
 document
   .getElementById(
@@ -583,6 +641,8 @@ document
       )
   );
 
+// Exit button
+
 document
   .getElementById(
     "exitBtn"
@@ -594,6 +654,8 @@ document
         "EXIT"
       )
   );
+
+// Update exit button
 
 const updateExitBtn =
   document.getElementById(
