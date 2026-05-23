@@ -3,109 +3,73 @@ const supabaseClient = supabase.createClient(
   SUPABASE_API_KEY
 );
 
-// Telegram
-
+// Telegram Notification Service
 async function sendTelegramMessage(message) {
-
   try {
-
     await fetch(
       "/.netlify/functions/sendTelegram",
       {
         method: "POST",
-
         headers: {
           "Content-Type": "application/json",
         },
-
         body: JSON.stringify({
           message,
         }),
       }
     );
-
   } catch (err) {
-
     console.error(err);
   }
 }
 
-// Load active users
-
+// Load active users onto the UI
 async function loadActiveUsers() {
+  const { data } = await supabaseClient
+    .from("active_users")
+    .select("*");
 
-  const { data } =
-    await supabaseClient
-      .from("active_users")
-      .select("*");
-
-  const container =
-    document.getElementById(
-      "activeUsers"
-    );
-
+  const container = document.getElementById("activeUsers");
   container.innerHTML = "";
 
-  data.forEach((user) => {
-
-    container.innerHTML += `
-      <span class="user-badge">
-        ${user.user_name}
-      </span>
-    `;
-
-  });
-}
-
-// Load summary
-
-async function loadSummary() {
-
-  const { data } =
-    await supabaseClient
-      .from("user_totals")
-      .select("*");
-
-  const container =
-    document.getElementById(
-      "summary"
-    );
-
-  container.innerHTML = "";
-
-  data.forEach((user) => {
-
-    container.innerHTML += `
-      <div class="summary-item">
-
-        <strong>
+  if (data) {
+    data.forEach((user) => {
+      container.innerHTML += `
+        <span class="user-badge">
           ${user.user_name}
-        </strong>
-
-        <br>
-
-        Units:
-        ${Number(
-          user.total_units
-        ).toFixed(2)}
-
-        <br>
-
-        Amount:
-        ₹${Number(
-          user.total_amount
-        ).toFixed(2)}
-
-      </div>
-    `;
-
-  });
+        </span>
+      `;
+    });
+  }
 }
 
-// Recalculate billing
+// Load financial and unit summary onto the UI
+async function loadSummary() {
+  const { data } = await supabaseClient
+    .from("user_totals")
+    .select("*");
 
+  const container = document.getElementById("summary");
+  container.innerHTML = "";
+
+  if (data) {
+    data.forEach((user) => {
+      container.innerHTML += `
+        <div class="summary-item">
+          <strong>${user.user_name}</strong>
+          <br>
+          Units: ${Number(user.total_units).toFixed(2)}
+          <br>
+          Amount: ₹${Number(user.total_amount).toFixed(2)}
+        </div>
+      `;
+    });
+  }
+}
+
+// Recalculate billing engine (Handles out-of-order/late emergency exits)
 async function recalculateAllBilling() {
-
+  // 1. Wipe old calculation caches entirely to build fresh
   await supabaseClient
     .from("usage_segments")
     .delete()
@@ -116,390 +80,173 @@ async function recalculateAllBilling() {
     .delete()
     .not("user_name", "is", null);
 
-  const { data: events } =
-    await supabaseClient
-      .from("events")
-      .select("*")
-      .order(
-        "timestamp",
-        {
-          ascending: true
-        }
-      );
+  // CRITICAL FIX: Always pull events sorted by the actual meter value, NOT the insertion time.
+  // This places a late '12' perfectly before a previously entered '13'.
+  const { data: events } = await supabaseClient
+    .from("events")
+    .select("*")
+    .order("meter_reading", { ascending: true });
 
-  if (
-    !events ||
-    events.length === 0
-  ) {
+  if (!events || events.length === 0) {
     return;
   }
 
   let activeUsers = [];
 
-  for (
-    let i = 0;
-    i < events.length - 1;
-    i++
-  ) {
+  for (let i = 0; i < events.length - 1; i++) {
+    const currentEvent = events[i];
+    const nextEvent = events[i + 1];
 
-    const currentEvent =
-      events[i];
-
-    const nextEvent =
-      events[i + 1];
-
-    // JOIN before segment
-
-    if (
-      currentEvent.action ===
-      "JOIN"
-    ) {
-
-      if (
-        !activeUsers.includes(
-          currentEvent.user_name
-        )
-      ) {
-
-        activeUsers.push(
-          currentEvent.user_name
-        );
+    // FIX: Update active users state *before* analyzing the consumption window ahead
+    if (currentEvent.action === "JOIN") {
+      if (!activeUsers.includes(currentEvent.user_name)) {
+        activeUsers.push(currentEvent.user_name);
       }
+    } else if (currentEvent.action === "EXIT") {
+      activeUsers = activeUsers.filter(u => u !== currentEvent.user_name);
     }
 
-    const startMeter =
-      Number(
-        currentEvent.meter_reading
-      );
+    const startMeter = Number(currentEvent.meter_reading);
+    const endMeter = Number(nextEvent.meter_reading);
 
-    const endMeter =
-      Number(
-        nextEvent.meter_reading
-      );
-
-    // Calculate segment
-
-    if (
-      activeUsers.length > 0 &&
-      endMeter > startMeter
-    ) {
-
-      const unitsUsed =
-        Number(
-          (
-            endMeter -
-            startMeter
-          ).toFixed(2)
-        );
-
-      const cost =
-        Number(
-          (
-            unitsUsed *
-            UNIT_PRICE
-          ).toFixed(2)
-        );
-
-      const splitPerUser =
-        Number(
-          (
-            cost /
-            activeUsers.length
-          ).toFixed(2)
-        );
+    // If an active session exists and numbers are climbing, run calculation
+    if (activeUsers.length > 0 && endMeter > startMeter) {
+      const unitsUsed = Number((endMeter - startMeter).toFixed(2));
+      const cost = Number((unitsUsed * UNIT_PRICE).toFixed(2));
+      const splitPerUser = Number((cost / activeUsers.length).toFixed(2));
 
       await supabaseClient
         .from("usage_segments")
         .insert({
-
-          start_meter:
-            startMeter,
-
-          end_meter:
-            endMeter,
-
-          units_used:
-            unitsUsed,
-
-          active_users:
-            [...activeUsers],
-
+          start_meter: startMeter,
+          end_meter: endMeter,
+          units_used: unitsUsed,
+          active_users: [...activeUsers],
           cost,
-
-          split_per_user:
-            splitPerUser,
+          split_per_user: splitPerUser,
         });
 
-      // Update totals
-
-      for (
-        const user
-        of activeUsers
-      ) {
-
-        const {
-          data: existing
-        } = await supabaseClient
+      // Update compiled summary metrics
+      for (const user of activeUsers) {
+        const { data: existing } = await supabaseClient
           .from("user_totals")
           .select("*")
-          .eq(
-            "user_name",
-            user
-          )
+          .eq("user_name", user)
           .maybeSingle();
 
         if (existing) {
-
           await supabaseClient
             .from("user_totals")
             .update({
-
-              total_amount:
-                Number(
-                  existing.total_amount
-                ) +
-                splitPerUser,
-
-              total_units:
-                Number(
-                  existing.total_units
-                ) +
-                (
-                  unitsUsed /
-                  activeUsers.length
-                ),
-
+              total_amount: Number(existing.total_amount) + splitPerUser,
+              total_units: Number(existing.total_units) + (unitsUsed / activeUsers.length),
             })
-            .eq(
-              "user_name",
-              user
-            );
-
+            .eq("user_name", user);
         } else {
-
           await supabaseClient
             .from("user_totals")
             .insert({
-
-              user_name:
-                user,
-
-              total_amount:
-                splitPerUser,
-
-              total_units:
-                (
-                  unitsUsed /
-                  activeUsers.length
-                ),
+              user_name: user,
+              total_amount: splitPerUser,
+              total_units: (unitsUsed / activeUsers.length),
             });
         }
       }
-    }
-
-    // EXIT after segment
-
-    if (
-      currentEvent.action ===
-      "EXIT"
-    ) {
-
-      activeUsers =
-        activeUsers.filter(
-          u =>
-            u !==
-            currentEvent.user_name
-        );
     }
   }
 
   await loadSummary();
 }
 
-// Handle actions
-
+// Handle primary actions (JOIN / EXIT standard buttons)
 async function handleAction(action) {
+  const userName = document.getElementById("userSelect").value;
+  const meterReadingInput = document.getElementById("meterReading").value;
+  const meterReading = Number(meterReadingInput);
 
-  const userName =
-    document.getElementById(
-      "userSelect"
-    ).value;
-
-  const meterReading =
-    Number(
-      document.getElementById(
-        "meterReading"
-      ).value
-    );
-
-  // Validate meter
-
-  if (
-    meterReading === "" ||
-    meterReading === null ||
-    isNaN(meterReading)
-  ) {
-
-    alert(
-      "Enter meter reading"
-    );
-
+  // Form Validations
+  if (meterReadingInput === "" || meterReadingInput === null || isNaN(meterReading)) {
+    alert("Enter meter reading");
     return;
   }
-
-  // Validate negative
 
   if (meterReading < 0) {
-
-    alert(
-      "Invalid meter reading"
-    );
-
+    alert("Invalid meter reading");
     return;
   }
 
-  // Get latest event
+  // FIX FOR LATE EXIT EMERGENCIES: 
+  // We only block backward values on a *JOIN*. We bypass this validation on *EXIT* 
+  // so users can insert a skipped past exit value (like entering 12 even if 13 is already in DB).
+  if (action === "JOIN") {
+    const { data: lastEvent } = await supabaseClient
+      .from("events")
+      .select("*")
+      .order("meter_reading", { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
-  const {
-    data: lastEvent
-  } = await supabaseClient
-    .from("events")
-    .select("*")
-    .order(
-      "timestamp",
-      {
-        ascending: false
-      }
-    )
-    .limit(1)
-    .maybeSingle();
-
-  // Prevent lower meter
-
-  if (
-    lastEvent &&
-    meterReading <=
-    Number(
-      lastEvent.meter_reading
-    )
-  ) {
-
-    alert(
-      "Meter reading must increase"
-    );
-
-    return;
+    if (lastEvent && meterReading < Number(lastEvent.meter_reading)) {
+      alert("New JOIN meter reading cannot be lower than the latest recorded system meter");
+      return;
+    }
   }
 
-  // Get active users
-
-  const {
-    data: activeUsersData
-  } = await supabaseClient
+  // Pull online roster status
+  const { data: activeUsersData } = await supabaseClient
     .from("active_users")
     .select("*");
 
-  const activeUsers =
-    activeUsersData.map(
-      (u) => u.user_name
-    );
+  const activeUsers = activeUsersData ? activeUsersData.map((u) => u.user_name) : [];
 
-  // Prevent duplicate JOIN
-
-  if (
-    action === "JOIN" &&
-    activeUsers.includes(userName)
-  ) {
-
-    alert(
-      "User already active"
-    );
-
+  // Rules enforcement
+  if (action === "JOIN" && activeUsers.includes(userName)) {
+    alert("User already active");
     return;
   }
 
-  // Prevent invalid EXIT
-
-  if (
-    action === "EXIT" &&
-    !activeUsers.includes(userName)
-  ) {
-
-    alert(
-      "User not active"
-    );
-
+  if (action === "EXIT" && !activeUsers.includes(userName)) {
+    alert("User not active");
     return;
   }
 
-  // First usage check
-
-  const {
-    data: allEvents
-  } = await supabaseClient
+  // Verify baseline 0 point
+  const { data: allEvents } = await supabaseClient
     .from("events")
     .select("*");
 
-  const isFirstUsage =
-    !allEvents ||
-    allEvents.length === 0;
+  const isFirstUsage = !allEvents || allEvents.length === 0;
 
-  if (
-    isFirstUsage &&
-    meterReading !== 0
-  ) {
-
-    alert(
-      "First meter reading must be 0"
-    );
-
+  if (isFirstUsage && meterReading !== 0) {
+    alert("First meter reading must be 0");
     return;
   }
 
-  // Insert event
-
+  // Push event timeline marker
   await supabaseClient
     .from("events")
     .insert({
-
-      user_name:
-        userName,
-
+      user_name: userName,
       action,
-
-      meter_reading:
-        meterReading,
+      meter_reading: meterReading,
     });
 
-  // Update active users
-
+  // Track live user panel registry status
   if (action === "JOIN") {
-
     await supabaseClient
       .from("active_users")
-      .insert({
-
-        user_name:
-          userName
-      });
-
+      .insert({ user_name: userName });
   } else {
-
     await supabaseClient
       .from("active_users")
       .delete()
-      .eq(
-        "user_name",
-        userName
-      );
+      .eq("user_name", userName);
   }
 
-  // Recalculate billing
-
+  // Trigger mathematical history rebuild
   await recalculateAllBilling();
 
-  // Telegram
-
+  // Telegram dispatch message
   await sendTelegramMessage(
 `❄️ AC UPDATE
 
@@ -513,137 +260,57 @@ ${action}
 ${meterReading}`
   );
 
-  // Clear input
+  // Clean form input field
+  document.getElementById("meterReading").value = "";
 
-  document.getElementById(
-    "meterReading"
-  ).value = "";
-
-  // Reload UI
-
+  // Refresh user screens
   await loadActiveUsers();
-
   await loadSummary();
 }
 
-// Update missed exit
-
+// Retained clean correction utility function for completely overriding wrong record indices
 async function updateMissedExit() {
+  const userName = document.getElementById("userSelect").value;
+  const correctMeterInput = document.getElementById("meterReading").value;
+  const correctMeter = Number(correctMeterInput);
 
-  const userName =
-    document.getElementById(
-      "userSelect"
-    ).value;
-
-  const correctMeter =
-    Number(
-      document.getElementById(
-        "meterReading"
-      ).value
-    );
-
-  // Validate
-
-  if (
-    isNaN(correctMeter) ||
-    correctMeter < 0
-  ) {
-
-    alert(
-      "Enter valid meter"
-    );
-
+  if (correctMeterInput === "" || isNaN(correctMeter) || correctMeter < 0) {
+    alert("Enter valid meter");
     return;
   }
 
-  // Find latest exit
-
-  const {
-    data: latestExit
-  } = await supabaseClient
+  const { data: latestExit } = await supabaseClient
     .from("events")
     .select("*")
-    .eq(
-      "user_name",
-      userName
-    )
-    .eq(
-      "action",
-      "EXIT"
-    )
-    .order(
-      "timestamp",
-      {
-        ascending: false
-      }
-    )
+    .eq("user_name", userName)
+    .eq("action", "EXIT")
+    .order("timestamp", { ascending: false })
     .limit(1)
     .maybeSingle();
-
-  // No exit
 
   if (!latestExit) {
-
-    alert(
-      "No EXIT record found"
-    );
-
+    alert("No EXIT record found");
     return;
   }
 
-  // Get latest system meter
-
-  const {
-    data: latestSystemEvent
-  } = await supabaseClient
+  const { data: latestSystemEvent } = await supabaseClient
     .from("events")
     .select("*")
-    .order(
-      "timestamp",
-      {
-        ascending: false
-      }
-    )
+    .order("meter_reading", { ascending: false })
     .limit(1)
     .maybeSingle();
 
-  // Prevent impossible future correction
-
-  if (
-    latestSystemEvent &&
-    correctMeter >
-    Number(
-      latestSystemEvent.meter_reading
-    )
-  ) {
-
-    alert(
-      "Correction meter cannot exceed latest system meter"
-    );
-
+  if (latestSystemEvent && correctMeter > Number(latestSystemEvent.meter_reading)) {
+    alert("Correction meter cannot exceed latest system meter");
     return;
   }
-
-  // Update exit
 
   await supabaseClient
     .from("events")
-    .update({
-
-      meter_reading:
-        correctMeter
-
-    })
-    .eq(
-      "id",
-      latestExit.id
-    );
-
-  // Recalculate
+    .update({ meter_reading: correctMeter })
+    .eq("id", latestExit.id);
 
   await recalculateAllBilling();
-
-  // Telegram
 
   await sendTelegramMessage(
 `✏️ EXIT UPDATED
@@ -655,65 +322,27 @@ ${userName}
 ${correctMeter}`
   );
 
-  alert(
-    "Exit updated successfully"
-  );
-
-  // Clear field
-
-  document.getElementById(
-    "meterReading"
-  ).value = "";
-
+  alert("Exit updated successfully");
+  document.getElementById("meterReading").value = "";
   await loadSummary();
 }
 
-// Join button
-
-document
-  .getElementById(
-    "joinBtn"
-  )
-  .addEventListener(
-    "click",
-    () =>
-      handleAction(
-        "JOIN"
-      )
-  );
-
-// Exit button
-
-document
-  .getElementById(
-    "exitBtn"
-  )
-  .addEventListener(
-    "click",
-    () =>
-      handleAction(
-        "EXIT"
-      )
-  );
-
-// Update exit button
-
-const updateExitBtn =
-  document.getElementById(
-    "updateExitBtn"
-  );
-
-if (updateExitBtn) {
-
-  updateExitBtn
-    .addEventListener(
-      "click",
-      updateMissedExit
-    );
+// Bind active interface handlers
+const joinBtn = document.getElementById("joinBtn");
+if (joinBtn) {
+  joinBtn.addEventListener("click", () => handleAction("JOIN"));
 }
 
-// Initial load
+const exitBtn = document.getElementById("exitBtn");
+if (exitBtn) {
+  exitBtn.addEventListener("click", () => handleAction("EXIT"));
+}
 
+const updateExitBtn = document.getElementById("updateExitBtn");
+if (updateExitBtn) {
+  updateExitBtn.addEventListener("click", updateMissedExit);
+}
+
+// Initialization execute loop run
 loadActiveUsers();
-
 loadSummary();
