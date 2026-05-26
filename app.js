@@ -3,6 +3,9 @@ const supabaseClient = supabase.createClient(
   SUPABASE_API_KEY
 );
 
+// Electricity unit price
+const UNIT_PRICE = 8;
+
 // Telegram Notification Service
 async function sendTelegramMessage(message) {
   try {
@@ -23,26 +26,34 @@ async function sendTelegramMessage(message) {
   }
 }
 
-// Get current date and time in readable format
+// Get current date and time
 function getCurrentDateTime() {
   const now = new Date();
-  
-  // Format date as DD-MMM-YYYY
-  const day = String(now.getDate()).padStart(2, '0');
-  const month = now.toLocaleDateString('en-US', { month: 'short' }).toLowerCase();
+
+  const day = String(now.getDate()).padStart(2, "0");
+
+  const month = now
+    .toLocaleDateString("en-US", {
+      month: "short",
+    })
+    .toLowerCase();
+
   const year = now.getFullYear();
-  
-  // Format time as HH:MM:SS AM/PM
-  const hours = String(now.getHours()).padStart(2, '0');
-  const minutes = String(now.getMinutes()).padStart(2, '0');
-  const seconds = String(now.getSeconds()).padStart(2, '0');
-  const ampm = now.getHours() >= 12 ? 'PM' : 'AM';
-  
+
+  const hours = String(now.getHours()).padStart(2, "0");
+
+  const minutes = String(now.getMinutes()).padStart(2, "0");
+
+  const seconds = String(now.getSeconds()).padStart(2, "0");
+
+  const ampm = now.getHours() >= 12 ? "PM" : "AM";
+
   return `${day}-${month}-${year} ${hours}:${minutes}:${seconds} ${ampm}`;
 }
 
-// Generate cycle summary message
+// Generate completed cycle summary message
 async function generateCycleSummaryMessage() {
+
   const { data: userTotals } = await supabaseClient
     .from("user_totals")
     .select("*");
@@ -52,67 +63,129 @@ async function generateCycleSummaryMessage() {
   }
 
   let message = `🔄 CYCLE COMPLETED\n\n`;
+
   message += `📅 Date & Time:\n${getCurrentDateTime()}\n\n`;
+
   message += `📊 Individual Usage & Bills:\n\n`;
 
   let totalUnits = 0;
+
   let totalAmount = 0;
 
   for (const user of userTotals) {
-    const units = Number(user.total_units).toFixed(2);
-    const amount = Number(user.total_amount).toFixed(2);
-    
-    totalUnits += Number(units);
-    totalAmount += Number(amount);
-    
+
+    const units = Number(user.total_units);
+
+    const amount = Number(user.total_amount);
+
+    totalUnits += units;
+
+    totalAmount += amount;
+
     message += `👤 ${user.user_name}\n`;
-    message += `   Units: ${units}\n`;
-    message += `   Amount: ₹${amount}\n\n`;
+
+    message += `   Units: ${units.toFixed(2)}\n`;
+
+    message += `   Amount: ₹${amount.toFixed(2)}\n\n`;
+
   }
 
   message += `━━━━━━━━━━━━━━━━━\n`;
+
   message += `📈 Cycle Totals:\n`;
+
   message += `   Total Units: ${totalUnits.toFixed(2)}\n`;
+
   message += `   Total Amount: ₹${totalAmount.toFixed(2)}\n`;
 
   return message;
 }
 
-// Reset billing for next cycle - Clear all tables but preserve last meter reading
+// Reset cycle data
 async function resetCycleData() {
+
   console.log("🔄 Resetting database for new cycle...");
-  
-  // Capture last meter reading before clearing
+
+  // Get last meter reading
   const { data: lastEventData } = await supabaseClient
     .from("events")
     .select("*")
-    .order("meter_reading", { ascending: false })
+    .order("meter_reading", {
+      ascending: false,
+    })
     .limit(1)
     .maybeSingle();
 
-  const lastMeterReading = lastEventData ? Number(lastEventData.meter_reading) : 0;
-  console.log(`📊 Last meter reading from cycle: ${lastMeterReading}`);
+  const lastMeterReading = lastEventData
+    ? Number(lastEventData.meter_reading)
+    : 0;
 
-  // Clear user totals (summaries)
+  console.log(
+    `📊 Last meter reading from cycle: ${lastMeterReading}`
+  );
+
+  // Save completed cycle history
+  const { data: totals } = await supabaseClient
+    .from("user_totals")
+    .select("*");
+
+  let totalUnits = 0;
+
+  let totalAmount = 0;
+
+  if (totals) {
+
+    totals.forEach((u) => {
+
+      totalUnits += Number(u.total_units);
+
+      totalAmount += Number(u.total_amount);
+
+    });
+
+  }
+
+  await supabaseClient
+    .from("cycle_history")
+    .insert({
+
+      cycle_end_reading: lastMeterReading,
+
+      total_units: Number(totalUnits.toFixed(2)),
+
+      total_amount: Number(totalAmount.toFixed(2)),
+
+      completed_at: new Date().toISOString(),
+
+    });
+
+  // Clear summaries
   await supabaseClient
     .from("user_totals")
     .delete()
     .not("user_name", "is", null);
 
-  // Clear usage segments (calculation cache)
+  // Clear usage segments
   await supabaseClient
     .from("usage_segments")
     .delete()
     .not("id", "is", null);
 
-  // Clear events (meter readings and actions)
+  // Clear events
   await supabaseClient
     .from("events")
     .delete()
     .not("id", "is", null);
 
-  // Insert baseline event for next cycle starting point
+  // Clear active users
+  await supabaseClient
+    .from("active_users")
+    .delete()
+    .not("user_name", "is", null);
+
+  // Insert baseline
   if (lastMeterReading > 0) {
+
     await supabaseClient
       .from("events")
       .insert({
@@ -120,89 +193,209 @@ async function resetCycleData() {
         action: "BASELINE",
         meter_reading: lastMeterReading,
       });
-    console.log(`✅ Cycle reset. Next cycle starts from meter reading: ${lastMeterReading}`);
+
+    console.log(
+      `✅ New cycle baseline created at meter ${lastMeterReading}`
+    );
+
   } else {
-    console.log("✅ Database cleaned. Ready for first cycle from meter 0!");
+
+    console.log(
+      "✅ Fresh system initialized"
+    );
+
   }
 }
 
-// Load active users onto the UI
+// Load active users
 async function loadActiveUsers() {
+
   const { data } = await supabaseClient
     .from("active_users")
     .select("*");
 
-  const container = document.getElementById("activeUsers");
+  const container =
+    document.getElementById("activeUsers");
+
+  if (!container) return;
+
   container.innerHTML = "";
 
   if (data) {
+
     data.forEach((user) => {
+
       container.innerHTML += `
         <span class="user-badge">
           ${user.user_name}
         </span>
       `;
+
     });
+
   }
 }
 
-// Load last meter reading from database
+// Load last meter reading
 async function loadLastMeterReading() {
-  const { data: lastEvent } = await supabaseClient
-    .from("events")
-    .select("*")
-    .order("meter_reading", { ascending: false })
-    .limit(1)
-    .maybeSingle();
 
-  const container = document.getElementById("lastReading");
+  const { data: lastEvent } =
+    await supabaseClient
+      .from("events")
+      .select("*")
+      .order("meter_reading", {
+        ascending: false,
+      })
+      .limit(1)
+      .maybeSingle();
+
+  const container =
+    document.getElementById("lastReading");
+
   if (!container) return;
-  
+
   if (lastEvent) {
-    const reading = Number(lastEvent.meter_reading).toFixed(2);
+
     container.innerHTML = `
       <div class="last-reading-item">
+
         <strong>Last Recorded Reading:</strong>
-        <span class="meter-value">${reading} units</span>
+
+        <span class="meter-value">
+          ${Number(lastEvent.meter_reading).toFixed(2)} units
+        </span>
+
       </div>
     `;
+
   } else {
+
     container.innerHTML = `
       <div class="last-reading-item">
+
         <strong>Last Recorded Reading:</strong>
-        <span class="meter-value">No readings yet</span>
+
+        <span class="meter-value">
+          No readings yet
+        </span>
+
       </div>
     `;
+
   }
 }
 
-// Load financial and unit summary onto the UI
+// Load current cycle summary
 async function loadSummary() {
+
   const { data } = await supabaseClient
     .from("user_totals")
     .select("*");
 
-  const container = document.getElementById("summary");
+  const container =
+    document.getElementById("summary");
+
+  if (!container) return;
+
   container.innerHTML = "";
 
-  if (data) {
+  if (data && data.length > 0) {
+
     data.forEach((user) => {
+
       container.innerHTML += `
         <div class="summary-item">
+
           <strong>${user.user_name}</strong>
+
           <br>
-          Units: ${Number(user.total_units).toFixed(2)}
+
+          Units:
+          ${Number(user.total_units).toFixed(2)}
+
           <br>
-          Amount: ₹${Number(user.total_amount).toFixed(2)}
+
+          Amount:
+          ₹${Number(user.total_amount).toFixed(2)}
+
         </div>
       `;
+
     });
+
+  } else {
+
+    container.innerHTML = `
+      <div class="summary-item">
+        No active cycle summary yet
+      </div>
+    `;
+
   }
 }
 
-// Recalculate billing engine (Handles out-of-order/late emergency exits)
+// Load last completed cycle summary
+async function loadLastCycleSummary() {
+
+  const { data } = await supabaseClient
+    .from("cycle_history")
+    .select("*")
+    .order("completed_at", {
+      ascending: false,
+    })
+    .limit(1)
+    .maybeSingle();
+
+  const container =
+    document.getElementById("lastCycleSummary");
+
+  if (!container) return;
+
+  if (data) {
+
+    container.innerHTML = `
+      <div class="summary-item">
+
+        <strong>Last Completed Cycle</strong>
+
+        <br>
+
+        End Meter:
+        ${Number(data.cycle_end_reading).toFixed(2)}
+
+        <br>
+
+        Total Units:
+        ${Number(data.total_units).toFixed(2)}
+
+        <br>
+
+        Total Amount:
+        ₹${Number(data.total_amount).toFixed(2)}
+
+        <br>
+
+        Completed At:
+        ${new Date(data.completed_at).toLocaleString()}
+
+      </div>
+    `;
+
+  } else {
+
+    container.innerHTML = `
+      <div class="summary-item">
+        No completed cycles yet
+      </div>
+    `;
+
+  }
+}
+
+// Recalculate billing
 async function recalculateAllBilling() {
-  // 1. Wipe old calculation caches entirely to build fresh
+
+  // Clear previous calculations
   await supabaseClient
     .from("usage_segments")
     .delete()
@@ -213,88 +406,174 @@ async function recalculateAllBilling() {
     .delete()
     .not("user_name", "is", null);
 
-  // CRITICAL FIX: Always pull events sorted by the actual meter value, NOT the insertion time.
-  // This places a late '12' perfectly before a previously entered '13'.
-  const { data: allEventsRaw } = await supabaseClient
-    .from("events")
-    .select("*")
-    .order("meter_reading", { ascending: true });
+  // Load all events in correct order
+  const { data: allEventsRaw } =
+    await supabaseClient
+      .from("events")
+      .select("*")
+      .order("meter_reading", {
+        ascending: true,
+      })
+      .order("timestamp", {
+        ascending: true,
+      });
 
-  // Filter out BASELINE events (system markers) - they don't participate in calculations
-  const events = allEventsRaw 
-    ? allEventsRaw.filter(e => e.action !== "BASELINE") 
-    : [];
+  if (!allEventsRaw || allEventsRaw.length === 0) {
+    return;
+  }
 
-  if (!events || events.length === 0) {
+  // Remove baseline markers
+  const events = allEventsRaw.filter(
+    (e) => e.action !== "BASELINE"
+  );
+
+  if (events.length === 0) {
     return;
   }
 
   let activeUsers = [];
 
   for (let i = 0; i < events.length - 1; i++) {
+
     const currentEvent = events[i];
+
     const nextEvent = events[i + 1];
 
-    // FIX: Update active users state *before* analyzing the consumption window ahead
+    // Apply current event state
     if (currentEvent.action === "JOIN") {
-      if (!activeUsers.includes(currentEvent.user_name)) {
+
+      if (
+        !activeUsers.includes(currentEvent.user_name)
+      ) {
         activeUsers.push(currentEvent.user_name);
       }
-    } else if (currentEvent.action === "EXIT") {
-      activeUsers = activeUsers.filter(u => u !== currentEvent.user_name);
+
     }
 
-    const startMeter = Number(currentEvent.meter_reading);
-    const endMeter = Number(nextEvent.meter_reading);
+    if (currentEvent.action === "EXIT") {
 
-    // CRITICAL: Validate that meter readings are never negative
-    if (startMeter < 0 || endMeter < 0) {
-      console.warn(`Invalid meter readings detected: start=${startMeter}, end=${endMeter}. Skipping calculation.`);
+      activeUsers = activeUsers.filter(
+        (u) => u !== currentEvent.user_name
+      );
+
+    }
+
+    const startMeter =
+      Number(currentEvent.meter_reading);
+
+    const endMeter =
+      Number(nextEvent.meter_reading);
+
+    // Validation
+    if (
+      !Number.isFinite(startMeter) ||
+      !Number.isFinite(endMeter)
+    ) {
       continue;
     }
 
-    // If an active session exists and numbers are climbing, run calculation
-    if (activeUsers.length > 0 && endMeter > startMeter) {
-      const unitsUsed = Number((endMeter - startMeter).toFixed(2));
-      const cost = Number((unitsUsed * UNIT_PRICE).toFixed(2));
-      const splitPerUser = Number((cost / activeUsers.length).toFixed(2));
+    if (startMeter < 0 || endMeter < 0) {
+      continue;
+    }
 
-      await supabaseClient
-        .from("usage_segments")
-        .insert({
-          start_meter: startMeter,
-          end_meter: endMeter,
-          units_used: unitsUsed,
-          active_users: [...activeUsers],
-          cost,
-          split_per_user: splitPerUser,
-        });
+    if (endMeter <= startMeter) {
+      continue;
+    }
 
-      // Update compiled summary metrics
-      for (const user of activeUsers) {
-        const { data: existing } = await supabaseClient
+    if (activeUsers.length === 0) {
+      continue;
+    }
+
+    const unitsUsed = Number(
+      (endMeter - startMeter).toFixed(2)
+    );
+
+    const cost = Number(
+      (unitsUsed * UNIT_PRICE).toFixed(2)
+    );
+
+    const splitUnits = Number(
+      (
+        unitsUsed / activeUsers.length
+      ).toFixed(4)
+    );
+
+    const splitCost = Number(
+      (
+        cost / activeUsers.length
+      ).toFixed(2)
+    );
+
+    // Save usage segment
+    await supabaseClient
+      .from("usage_segments")
+      .insert({
+
+        start_meter: startMeter,
+
+        end_meter: endMeter,
+
+        units_used: unitsUsed,
+
+        active_users: [...activeUsers],
+
+        cost,
+
+        split_per_user: splitCost,
+
+      });
+
+    // Update user totals
+    for (const user of activeUsers) {
+
+      const { data: existing } =
+        await supabaseClient
           .from("user_totals")
           .select("*")
           .eq("user_name", user)
           .maybeSingle();
 
-        if (existing) {
-          await supabaseClient
-            .from("user_totals")
-            .update({
-              total_amount: Number(existing.total_amount) + splitPerUser,
-              total_units: Number(existing.total_units) + (unitsUsed / activeUsers.length),
-            })
-            .eq("user_name", user);
-        } else {
-          await supabaseClient
-            .from("user_totals")
-            .insert({
-              user_name: user,
-              total_amount: splitPerUser,
-              total_units: (unitsUsed / activeUsers.length),
-            });
-        }
+      if (existing) {
+
+        const updatedAmount = Number(
+          (
+            Number(existing.total_amount) +
+            splitCost
+          ).toFixed(2)
+        );
+
+        const updatedUnits = Number(
+          (
+            Number(existing.total_units) +
+            splitUnits
+          ).toFixed(4)
+        );
+
+        await supabaseClient
+          .from("user_totals")
+          .update({
+
+            total_amount: updatedAmount,
+
+            total_units: updatedUnits,
+
+          })
+          .eq("user_name", user);
+
+      } else {
+
+        await supabaseClient
+          .from("user_totals")
+          .insert({
+
+            user_name: user,
+
+            total_amount: splitCost,
+
+            total_units: splitUnits,
+
+          });
+
       }
     }
   }
@@ -302,141 +581,201 @@ async function recalculateAllBilling() {
   await loadSummary();
 }
 
-// Handle primary actions (JOIN / EXIT standard buttons)
+// Main JOIN / EXIT handler
 async function handleAction(action) {
-  const userName = document.getElementById("userSelect").value;
-  const meterReadingInput = document.getElementById("meterReading").value;
-  const meterReading = Number(meterReadingInput);
 
-  // Form Validations
-  if (meterReadingInput === "" || meterReadingInput === null || isNaN(meterReading)) {
+  const userName =
+    document.getElementById("userSelect").value;
+
+  const meterReadingInput =
+    document.getElementById("meterReading").value;
+
+  const meterReading =
+    Number(meterReadingInput);
+
+  // Validation
+  if (
+    meterReadingInput === "" ||
+    meterReadingInput === null ||
+    isNaN(meterReading)
+  ) {
     alert("Enter meter reading");
     return;
   }
 
-  // CRITICAL: Reject any negative or invalid meter readings
-  if (meterReading < 0 || !Number.isFinite(meterReading)) {
-    alert("Meter reading cannot be negative. Please enter a valid positive number.");
+  // Negative value protection
+  if (
+    meterReading < 0 ||
+    !Number.isFinite(meterReading)
+  ) {
+    alert(
+      "Meter reading must be a valid positive number"
+    );
     return;
   }
 
-  // FIX FOR LATE EXIT EMERGENCIES: 
-  // We only block backward values on a *JOIN*. We bypass this validation on *EXIT* 
-  // so users can insert a skipped past exit value (like entering 12 even if 13 is already in DB).
-  if (action === "JOIN") {
-    const { data: lastEvent } = await supabaseClient
+  // Get all events
+  const { data: allEvents } =
+    await supabaseClient
       .from("events")
-      .select("*")
-      .order("meter_reading", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .select("*");
 
-    if (lastEvent && meterReading < Number(lastEvent.meter_reading)) {
-      alert("New JOIN meter reading cannot be lower than the latest recorded system meter");
+  // First ever usage
+  const isCompletelyFreshSystem =
+    !allEvents || allEvents.length === 0;
+
+  if (
+    isCompletelyFreshSystem &&
+    meterReading !== 0
+  ) {
+    alert(
+      "First meter reading must be 0"
+    );
+    return;
+  }
+
+  // Baseline logic
+  const baselineEvent = allEvents
+    ? allEvents.find(
+        (e) => e.action === "BASELINE"
+      )
+    : null;
+
+  if (baselineEvent && action === "JOIN") {
+
+    const baselineReading =
+      Number(baselineEvent.meter_reading);
+
+    if (meterReading < baselineReading) {
+
+      alert(
+        `New cycle must start from at least ${baselineReading}`
+      );
+
       return;
     }
   }
 
-  // Pull online roster status
-  const { data: activeUsersData } = await supabaseClient
-    .from("active_users")
-    .select("*");
+  // Prevent backward JOIN
+  if (action === "JOIN") {
 
-  const activeUsers = activeUsersData ? activeUsersData.map((u) => u.user_name) : [];
+    const { data: latestEvent } =
+      await supabaseClient
+        .from("events")
+        .select("*")
+        .order("meter_reading", {
+          ascending: false,
+        })
+        .limit(1)
+        .maybeSingle();
 
-  // Rules enforcement
-  if (action === "JOIN" && activeUsers.includes(userName)) {
+    if (
+      latestEvent &&
+      meterReading <
+        Number(latestEvent.meter_reading)
+    ) {
+
+      alert(
+        "JOIN meter cannot be lower than latest meter"
+      );
+
+      return;
+    }
+  }
+
+  // Active users
+  const { data: activeUsersData } =
+    await supabaseClient
+      .from("active_users")
+      .select("*");
+
+  const activeUsers = activeUsersData
+    ? activeUsersData.map(
+        (u) => u.user_name
+      )
+    : [];
+
+  // Duplicate JOIN check
+  if (
+    action === "JOIN" &&
+    activeUsers.includes(userName)
+  ) {
     alert("User already active");
     return;
   }
 
-  if (action === "EXIT" && !activeUsers.includes(userName)) {
+  // EXIT validation
+  if (
+    action === "EXIT" &&
+    !activeUsers.includes(userName)
+  ) {
     alert("User not active");
     return;
   }
 
-  // Verify baseline - Check if this is the very first usage (ever, not just this cycle)
-  const { data: allEvents } = await supabaseClient
-    .from("events")
-    .select("*");
-
-  // // Filter out BASELINE events (system markers from cycle resets)
-  // const actualUserEvents = allEvents ? allEvents.filter(e => e.action !== "BASELINE") : [];
-  // const isFirstUsageEver = !actualUserEvents || actualUserEvents.length === 0;
-
-  // Find baseline event if exists
-const baselineEvent = allEvents ? allEvents.find(e => e.action === "BASELINE") : null;
-
-// True only when absolutely no records exist
-const isCompletelyFreshSystem = !allEvents || allEvents.length === 0;
-
-  // if (isFirstUsageEver && meterReading !== 0) {
-  //   alert("First meter reading must be 0");
-  //   return;
-  // }
-
-  // First ever app usage
-if (isCompletelyFreshSystem && meterReading !== 0) {
-  alert("First meter reading must be 0");
-  return;
-}
-
-// After cycle reset, next cycle must start from previous ending reading
-if (baselineEvent && action === "JOIN") {
-  const baselineReading = Number(baselineEvent.meter_reading);
-
-  if (meterReading < baselineReading) {
-    alert(`New cycle must start from at least ${baselineReading}`);
-    return;
-  }
-}
-
-  // Push event timeline marker
+  // Insert event
   await supabaseClient
     .from("events")
     .insert({
+
       user_name: userName,
+
       action,
+
       meter_reading: meterReading,
+
     });
 
-  // Track live user panel registry status
+  // Update active user registry
   if (action === "JOIN") {
+
     await supabaseClient
       .from("active_users")
-      .insert({ user_name: userName });
-  } else {
+      .insert({
+        user_name: userName,
+      });
+
+  }
+
+  if (action === "EXIT") {
+
     await supabaseClient
       .from("active_users")
       .delete()
       .eq("user_name", userName);
 
-    // Check if this was the last user (cycle completed)
-    const { data: remainingUsers } = await supabaseClient
+  }
+
+  // Recalculate after every action
+  await recalculateAllBilling();
+
+  // Check cycle completion
+  const { data: remainingUsers } =
+    await supabaseClient
       .from("active_users")
       .select("*");
 
-    if (!remainingUsers || remainingUsers.length === 0) {
-      // CRITICAL FIX: Recalculate billing FIRST to include final segment
-      // This must happen before generating the summary to ensure all units are counted
-      await recalculateAllBilling();
+  if (
+    action === "EXIT" &&
+    remainingUsers &&
+    remainingUsers.length === 0
+  ) {
 
-      // Now generate summary with complete calculations
-      const cycleSummary = await generateCycleSummaryMessage();
-      if (cycleSummary) {
-        // Send via Telegram
-        await sendTelegramMessage(cycleSummary);
-        // Reset counters for next cycle
-        await resetCycleData();
-      }
-    } else {
-      // If cycle is not complete, still recalculate for normal EXIT
-      // Trigger mathematical history rebuild
-      await recalculateAllBilling();
+    const cycleSummary =
+      await generateCycleSummaryMessage();
+
+    if (cycleSummary) {
+
+      await sendTelegramMessage(
+        cycleSummary
+      );
+
     }
+
+    await resetCycleData();
   }
 
-  // Telegram dispatch message
+  // Send update notification
   await sendTelegramMessage(
 `❄️ AC UPDATE
 
@@ -450,60 +789,106 @@ ${action}
 ${meterReading}`
   );
 
-  // Clean form input field
-  document.getElementById("meterReading").value = "";
+  // Clear input
+  document.getElementById(
+    "meterReading"
+  ).value = "";
 
-  // Refresh user screens
+  // Refresh UI
   await loadActiveUsers();
+
   await loadLastMeterReading();
+
   await loadSummary();
+
+  await loadLastCycleSummary();
 }
 
-// Retained clean correction utility function for completely overriding wrong record indices
+// Update missed EXIT
 async function updateMissedExit() {
-  const userName = document.getElementById("userSelect").value;
-  const correctMeterInput = document.getElementById("meterReading").value;
-  const correctMeter = Number(correctMeterInput);
 
-  // CRITICAL: Strictly validate - no negative values allowed
-  if (correctMeterInput === "" || isNaN(correctMeter) || correctMeter < 0 || !Number.isFinite(correctMeter)) {
-    alert("Meter reading must be a valid positive number (no negative values allowed)");
+  const userName =
+    document.getElementById("userSelect").value;
+
+  const correctMeterInput =
+    document.getElementById("meterReading").value;
+
+  const correctMeter =
+    Number(correctMeterInput);
+
+  // Validation
+  if (
+    correctMeterInput === "" ||
+    isNaN(correctMeter) ||
+    correctMeter < 0 ||
+    !Number.isFinite(correctMeter)
+  ) {
+
+    alert(
+      "Meter reading must be a valid positive number"
+    );
+
     return;
   }
 
-  const { data: latestExit } = await supabaseClient
-    .from("events")
-    .select("*")
-    .eq("user_name", userName)
-    .eq("action", "EXIT")
-    .order("timestamp", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // Find latest exit
+  const { data: latestExit } =
+    await supabaseClient
+      .from("events")
+      .select("*")
+      .eq("user_name", userName)
+      .eq("action", "EXIT")
+      .order("timestamp", {
+        ascending: false,
+      })
+      .limit(1)
+      .maybeSingle();
 
   if (!latestExit) {
+
     alert("No EXIT record found");
+
     return;
   }
 
-  const { data: latestSystemEvent } = await supabaseClient
-    .from("events")
-    .select("*")
-    .order("meter_reading", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // Validate correction
+  const { data: latestSystemEvent } =
+    await supabaseClient
+      .from("events")
+      .select("*")
+      .order("meter_reading", {
+        ascending: false,
+      })
+      .limit(1)
+      .maybeSingle();
 
-  if (latestSystemEvent && correctMeter > Number(latestSystemEvent.meter_reading)) {
-    alert("Correction meter cannot exceed latest system meter");
+  if (
+    latestSystemEvent &&
+    correctMeter >
+      Number(
+        latestSystemEvent.meter_reading
+      )
+  ) {
+
+    alert(
+      "Correction meter cannot exceed latest system meter"
+    );
+
     return;
   }
 
+  // Update exit
   await supabaseClient
     .from("events")
-    .update({ meter_reading: correctMeter })
+    .update({
+      meter_reading: correctMeter,
+    })
     .eq("id", latestExit.id);
 
+  // Recalculate
   await recalculateAllBilling();
 
+  // Notify
   await sendTelegramMessage(
 `✏️ EXIT UPDATED
 
@@ -514,28 +899,64 @@ ${userName}
 ${correctMeter}`
   );
 
-  alert("Exit updated successfully");
-  document.getElementById("meterReading").value = "";
+  alert(
+    "Exit updated successfully"
+  );
+
+  document.getElementById(
+    "meterReading"
+  ).value = "";
+
   await loadSummary();
+
+  await loadLastCycleSummary();
 }
 
-// Bind active interface handlers
-const joinBtn = document.getElementById("joinBtn");
+// Bind buttons
+const joinBtn =
+  document.getElementById("joinBtn");
+
 if (joinBtn) {
-  joinBtn.addEventListener("click", () => handleAction("JOIN"));
+
+  joinBtn.addEventListener(
+    "click",
+    () => handleAction("JOIN")
+  );
+
 }
 
-const exitBtn = document.getElementById("exitBtn");
+const exitBtn =
+  document.getElementById("exitBtn");
+
 if (exitBtn) {
-  exitBtn.addEventListener("click", () => handleAction("EXIT"));
+
+  exitBtn.addEventListener(
+    "click",
+    () => handleAction("EXIT")
+  );
+
 }
 
-const updateExitBtn = document.getElementById("updateExitBtn");
+// Optional update button
+const updateExitBtn =
+  document.getElementById(
+    "updateExitBtn"
+  );
+
 if (updateExitBtn) {
-  updateExitBtn.addEventListener("click", updateMissedExit);
+
+  updateExitBtn.addEventListener(
+    "click",
+    updateMissedExit
+  );
+
 }
 
-// Initialization execute loop run
+// Initial load
 loadActiveUsers();
+
 loadLastMeterReading();
+
 loadSummary();
+
+loadLastCycleSummary();
