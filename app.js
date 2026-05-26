@@ -26,16 +26,19 @@ async function sendTelegramMessage(message) {
 // Get current date and time in readable format
 function getCurrentDateTime() {
   const now = new Date();
-  const options = {
-    year: 'numeric',
-    month: 'short',
-    date: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: true
-  };
-  return now.toLocaleDateString('en-US', options);
+  
+  // Format date as DD-MMM-YYYY
+  const day = String(now.getDate()).padStart(2, '0');
+  const month = now.toLocaleDateString('en-US', { month: 'short' }).toLowerCase();
+  const year = now.getFullYear();
+  
+  // Format time as HH:MM:SS AM/PM
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  const ampm = now.getHours() >= 12 ? 'PM' : 'AM';
+  
+  return `${day}-${month}-${year} ${hours}:${minutes}:${seconds} ${ampm}`;
 }
 
 // Generate cycle summary message
@@ -140,6 +143,36 @@ async function loadActiveUsers() {
         </span>
       `;
     });
+  }
+}
+
+// Load last meter reading from database
+async function loadLastMeterReading() {
+  const { data: lastEvent } = await supabaseClient
+    .from("events")
+    .select("*")
+    .order("meter_reading", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const container = document.getElementById("lastReading");
+  if (!container) return;
+  
+  if (lastEvent) {
+    const reading = Number(lastEvent.meter_reading).toFixed(2);
+    container.innerHTML = `
+      <div class="last-reading-item">
+        <strong>Last Recorded Reading:</strong>
+        <span class="meter-value">${reading} units</span>
+      </div>
+    `;
+  } else {
+    container.innerHTML = `
+      <div class="last-reading-item">
+        <strong>Last Recorded Reading:</strong>
+        <span class="meter-value">No readings yet</span>
+      </div>
+    `;
   }
 }
 
@@ -362,7 +395,11 @@ async function handleAction(action) {
       .select("*");
 
     if (!remainingUsers || remainingUsers.length === 0) {
-      // Cycle is complete - generate summary and send via Telegram
+      // CRITICAL FIX: Recalculate billing FIRST to include final segment
+      // This must happen before generating the summary to ensure all units are counted
+      await recalculateAllBilling();
+
+      // Now generate summary with complete calculations
       const cycleSummary = await generateCycleSummaryMessage();
       if (cycleSummary) {
         // Send via Telegram
@@ -370,11 +407,12 @@ async function handleAction(action) {
         // Reset counters for next cycle
         await resetCycleData();
       }
+    } else {
+      // If cycle is not complete, still recalculate for normal EXIT
+      // Trigger mathematical history rebuild
+      await recalculateAllBilling();
     }
   }
-
-  // Trigger mathematical history rebuild
-  await recalculateAllBilling();
 
   // Telegram dispatch message
   await sendTelegramMessage(
@@ -395,6 +433,7 @@ ${meterReading}`
 
   // Refresh user screens
   await loadActiveUsers();
+  await loadLastMeterReading();
   await loadSummary();
 }
 
@@ -476,4 +515,5 @@ if (updateExitBtn) {
 
 // Initialization execute loop run
 loadActiveUsers();
+loadLastMeterReading();
 loadSummary();
