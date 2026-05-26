@@ -360,14 +360,36 @@ async function handleAction(action) {
     .from("events")
     .select("*");
 
-  // Filter out BASELINE events (system markers from cycle resets)
-  const actualUserEvents = allEvents ? allEvents.filter(e => e.action !== "BASELINE") : [];
-  const isFirstUsageEver = !actualUserEvents || actualUserEvents.length === 0;
+  // // Filter out BASELINE events (system markers from cycle resets)
+  // const actualUserEvents = allEvents ? allEvents.filter(e => e.action !== "BASELINE") : [];
+  // const isFirstUsageEver = !actualUserEvents || actualUserEvents.length === 0;
 
-  if (isFirstUsageEver && meterReading !== 0) {
-    alert("First meter reading must be 0");
+  // Find baseline event if exists
+const baselineEvent = allEvents ? allEvents.find(e => e.action === "BASELINE") : null;
+
+// True only when absolutely no records exist
+const isCompletelyFreshSystem = !allEvents || allEvents.length === 0;
+
+  // if (isFirstUsageEver && meterReading !== 0) {
+  //   alert("First meter reading must be 0");
+  //   return;
+  // }
+
+  // First ever app usage
+if (isCompletelyFreshSystem && meterReading !== 0) {
+  alert("First meter reading must be 0");
+  return;
+}
+
+// After cycle reset, next cycle must start from previous ending reading
+if (baselineEvent && action === "JOIN") {
+  const baselineReading = Number(baselineEvent.meter_reading);
+
+  if (meterReading < baselineReading) {
+    alert(`New cycle must start from at least ${baselineReading}`);
     return;
   }
+}
 
   // Push event timeline marker
   await supabaseClient
