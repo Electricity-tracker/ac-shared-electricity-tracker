@@ -23,6 +23,106 @@ async function sendTelegramMessage(message) {
   }
 }
 
+// Get current date and time in readable format
+function getCurrentDateTime() {
+  const now = new Date();
+  const options = {
+    year: 'numeric',
+    month: 'short',
+    date: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true
+  };
+  return now.toLocaleDateString('en-US', options);
+}
+
+// Generate cycle summary message
+async function generateCycleSummaryMessage() {
+  const { data: userTotals } = await supabaseClient
+    .from("user_totals")
+    .select("*");
+
+  if (!userTotals || userTotals.length === 0) {
+    return null;
+  }
+
+  let message = `🔄 CYCLE COMPLETED\n\n`;
+  message += `📅 Date & Time:\n${getCurrentDateTime()}\n\n`;
+  message += `📊 Individual Usage & Bills:\n\n`;
+
+  let totalUnits = 0;
+  let totalAmount = 0;
+
+  for (const user of userTotals) {
+    const units = Number(user.total_units).toFixed(2);
+    const amount = Number(user.total_amount).toFixed(2);
+    
+    totalUnits += Number(units);
+    totalAmount += Number(amount);
+    
+    message += `👤 ${user.user_name}\n`;
+    message += `   Units: ${units}\n`;
+    message += `   Amount: ₹${amount}\n\n`;
+  }
+
+  message += `━━━━━━━━━━━━━━━━━\n`;
+  message += `📈 Cycle Totals:\n`;
+  message += `   Total Units: ${totalUnits.toFixed(2)}\n`;
+  message += `   Total Amount: ₹${totalAmount.toFixed(2)}\n`;
+
+  return message;
+}
+
+// Reset billing for next cycle - Clear all tables but preserve last meter reading
+async function resetCycleData() {
+  console.log("🔄 Resetting database for new cycle...");
+  
+  // Capture last meter reading before clearing
+  const { data: lastEventData } = await supabaseClient
+    .from("events")
+    .select("*")
+    .order("meter_reading", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const lastMeterReading = lastEventData ? Number(lastEventData.meter_reading) : 0;
+  console.log(`📊 Last meter reading from cycle: ${lastMeterReading}`);
+
+  // Clear user totals (summaries)
+  await supabaseClient
+    .from("user_totals")
+    .delete()
+    .not("user_name", "is", null);
+
+  // Clear usage segments (calculation cache)
+  await supabaseClient
+    .from("usage_segments")
+    .delete()
+    .not("id", "is", null);
+
+  // Clear events (meter readings and actions)
+  await supabaseClient
+    .from("events")
+    .delete()
+    .not("id", "is", null);
+
+  // Insert baseline event for next cycle starting point
+  if (lastMeterReading > 0) {
+    await supabaseClient
+      .from("events")
+      .insert({
+        user_name: "SYSTEM",
+        action: "BASELINE",
+        meter_reading: lastMeterReading,
+      });
+    console.log(`✅ Cycle reset. Next cycle starts from meter reading: ${lastMeterReading}`);
+  } else {
+    console.log("✅ Database cleaned. Ready for first cycle from meter 0!");
+  }
+}
+
 // Load active users onto the UI
 async function loadActiveUsers() {
   const { data } = await supabaseClient
@@ -82,10 +182,15 @@ async function recalculateAllBilling() {
 
   // CRITICAL FIX: Always pull events sorted by the actual meter value, NOT the insertion time.
   // This places a late '12' perfectly before a previously entered '13'.
-  const { data: events } = await supabaseClient
+  const { data: allEventsRaw } = await supabaseClient
     .from("events")
     .select("*")
     .order("meter_reading", { ascending: true });
+
+  // Filter out BASELINE events (system markers) - they don't participate in calculations
+  const events = allEventsRaw 
+    ? allEventsRaw.filter(e => e.action !== "BASELINE") 
+    : [];
 
   if (!events || events.length === 0) {
     return;
@@ -210,14 +315,16 @@ async function handleAction(action) {
     return;
   }
 
-  // Verify baseline 0 point
+  // Verify baseline - Check if this is the very first usage (ever, not just this cycle)
   const { data: allEvents } = await supabaseClient
     .from("events")
     .select("*");
 
-  const isFirstUsage = !allEvents || allEvents.length === 0;
+  // Filter out BASELINE events (system markers from cycle resets)
+  const actualUserEvents = allEvents ? allEvents.filter(e => e.action !== "BASELINE") : [];
+  const isFirstUsageEver = !actualUserEvents || actualUserEvents.length === 0;
 
-  if (isFirstUsage && meterReading !== 0) {
+  if (isFirstUsageEver && meterReading !== 0) {
     alert("First meter reading must be 0");
     return;
   }
@@ -241,6 +348,22 @@ async function handleAction(action) {
       .from("active_users")
       .delete()
       .eq("user_name", userName);
+
+    // Check if this was the last user (cycle completed)
+    const { data: remainingUsers } = await supabaseClient
+      .from("active_users")
+      .select("*");
+
+    if (!remainingUsers || remainingUsers.length === 0) {
+      // Cycle is complete - generate summary and send via Telegram
+      const cycleSummary = await generateCycleSummaryMessage();
+      if (cycleSummary) {
+        // Send via Telegram
+        await sendTelegramMessage(cycleSummary);
+        // Reset counters for next cycle
+        await resetCycleData();
+      }
+    }
   }
 
   // Trigger mathematical history rebuild
