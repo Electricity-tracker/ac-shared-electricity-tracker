@@ -1,9 +1,9 @@
 {
   "name": "ac-shared-electricity-tracker",
-
   "version": "1.0.0",
-
   "dependencies": {
+    "@supabase/supabase-js": "^2.106.2",
+    "express": "^5.2.1",
     "node-fetch": "^3.3.2"
   }
 }

@@ -109,6 +109,12 @@ async function recalculateAllBilling() {
     const startMeter = Number(currentEvent.meter_reading);
     const endMeter = Number(nextEvent.meter_reading);
 
+    // CRITICAL: Validate that meter readings are never negative
+    if (startMeter < 0 || endMeter < 0) {
+      console.warn(`Invalid meter readings detected: start=${startMeter}, end=${endMeter}. Skipping calculation.`);
+      continue;
+    }
+
     // If an active session exists and numbers are climbing, run calculation
     if (activeUsers.length > 0 && endMeter > startMeter) {
       const unitsUsed = Number((endMeter - startMeter).toFixed(2));
@@ -170,8 +176,9 @@ async function handleAction(action) {
     return;
   }
 
-  if (meterReading < 0) {
-    alert("Invalid meter reading");
+  // CRITICAL: Reject any negative or invalid meter readings
+  if (meterReading < 0 || !Number.isFinite(meterReading)) {
+    alert("Meter reading cannot be negative. Please enter a valid positive number.");
     return;
   }
 
@@ -274,8 +281,9 @@ async function updateMissedExit() {
   const correctMeterInput = document.getElementById("meterReading").value;
   const correctMeter = Number(correctMeterInput);
 
-  if (correctMeterInput === "" || isNaN(correctMeter) || correctMeter < 0) {
-    alert("Enter valid meter");
+  // CRITICAL: Strictly validate - no negative values allowed
+  if (correctMeterInput === "" || isNaN(correctMeter) || correctMeter < 0 || !Number.isFinite(correctMeter)) {
+    alert("Meter reading must be a valid positive number (no negative values allowed)");
     return;
   }
 
