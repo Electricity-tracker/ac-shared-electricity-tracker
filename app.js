@@ -3,6 +3,13 @@ const supabaseClient = supabase.createClient(
   SUPABASE_API_KEY
 );
 
+// Basic runtime diagnostics
+console.log("app.js loaded", {
+  hasSupabase: typeof supabase !== "undefined",
+  hasSupabaseClient: typeof supabaseClient !== "undefined",
+  hasConfig: typeof SUPABASE_URL !== "undefined" && typeof SUPABASE_API_KEY !== "undefined",
+});
+
 // Electricity unit price
 const UNIT_PRICE = 8;
 
@@ -744,6 +751,8 @@ async function handleAction(action) {
       "userSelect"
     ).value;
 
+  console.log("handleAction invoked", { action, userName });
+
   const meterReadingInput =
     document.getElementById(
       "meterReading"
@@ -1024,6 +1033,7 @@ const joinBtn =
   );
 
 if (joinBtn) {
+  console.log("joinBtn found, attaching listener");
 
   joinBtn.addEventListener(
     "click",
@@ -1041,6 +1051,7 @@ const exitBtn =
   );
 
 if (exitBtn) {
+  console.log("exitBtn found, attaching listener");
 
   exitBtn.addEventListener(
     "click",
