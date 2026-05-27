@@ -37,6 +37,7 @@ async function sendTelegramMessage(message) {
 function getCurrentDateTime() {
 
   const now = new Date();
+<<<<<<< HEAD
 
   const day = String(now.getDate()).padStart(2, "0");
 
@@ -60,6 +61,18 @@ function getCurrentDateTime() {
       : "AM";
 
   return `${day}-${month}-${year} ${hours}:${minutes}:${seconds} ${ampm}`;
+=======
+  const options = {
+    year: 'numeric',
+    month: 'short',
+    date: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true
+  };
+  return now.toLocaleDateString('en-US', options);
+>>>>>>> parent of 22eafd3 (Updated date time and calculation)
 }
 
 // Generate completed cycle summary message
@@ -290,6 +303,7 @@ async function loadActiveUsers() {
   }
 }
 
+<<<<<<< HEAD
 // Load last reading
 async function loadLastMeterReading() {
 
@@ -340,6 +354,9 @@ async function loadLastMeterReading() {
 }
 
 // Load current cycle summary
+=======
+// Load financial and unit summary onto the UI
+>>>>>>> parent of 22eafd3 (Updated date time and calculation)
 async function loadSummary() {
 
   const { data } =
@@ -877,6 +894,7 @@ async function handleAction(action) {
         "JOIN reading cannot be lower than latest meter"
       );
 
+<<<<<<< HEAD
       return;
     }
   }
@@ -998,6 +1016,63 @@ async function handleAction(action) {
   }
 
   // Telegram update
+=======
+  // Verify baseline - Check if this is the very first usage (ever, not just this cycle)
+  const { data: allEvents } = await supabaseClient
+    .from("events")
+    .select("*");
+
+  // Filter out BASELINE events (system markers from cycle resets)
+  const actualUserEvents = allEvents ? allEvents.filter(e => e.action !== "BASELINE") : [];
+  const isFirstUsageEver = !actualUserEvents || actualUserEvents.length === 0;
+
+  if (isFirstUsageEver && meterReading !== 0) {
+    alert("First meter reading must be 0");
+    return;
+  }
+
+  // Push event timeline marker
+  await supabaseClient
+    .from("events")
+    .insert({
+      user_name: userName,
+      action,
+      meter_reading: meterReading,
+    });
+
+  // Track live user panel registry status
+  if (action === "JOIN") {
+    await supabaseClient
+      .from("active_users")
+      .insert({ user_name: userName });
+  } else {
+    await supabaseClient
+      .from("active_users")
+      .delete()
+      .eq("user_name", userName);
+
+    // Check if this was the last user (cycle completed)
+    const { data: remainingUsers } = await supabaseClient
+      .from("active_users")
+      .select("*");
+
+    if (!remainingUsers || remainingUsers.length === 0) {
+      // Cycle is complete - generate summary and send via Telegram
+      const cycleSummary = await generateCycleSummaryMessage();
+      if (cycleSummary) {
+        // Send via Telegram
+        await sendTelegramMessage(cycleSummary);
+        // Reset counters for next cycle
+        await resetCycleData();
+      }
+    }
+  }
+
+  // Trigger mathematical history rebuild
+  await recalculateAllBilling();
+
+  // Telegram dispatch message
+>>>>>>> parent of 22eafd3 (Updated date time and calculation)
   await sendTelegramMessage(
 `❄️ AC UPDATE
 
@@ -1018,9 +1093,12 @@ ${meterReading}`
 
   // Refresh UI
   await loadActiveUsers();
+<<<<<<< HEAD
 
   await loadLastMeterReading();
 
+=======
+>>>>>>> parent of 22eafd3 (Updated date time and calculation)
   await loadSummary();
 
   await loadLastCycleSummary();
@@ -1065,9 +1143,13 @@ if (exitBtn) {
 
 // Initial load
 loadActiveUsers();
+<<<<<<< HEAD
 
 loadLastMeterReading();
 
 loadSummary();
 
 loadLastCycleSummary();
+=======
+loadSummary();
+>>>>>>> parent of 22eafd3 (Updated date time and calculation)
